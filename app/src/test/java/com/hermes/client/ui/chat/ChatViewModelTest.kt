@@ -9,6 +9,7 @@ import com.hermes.client.data.repository.ModelFavoritesStore
 import com.hermes.client.data.repository.ModelRepository
 import com.hermes.client.data.repository.ProfileRepository
 import com.hermes.client.data.repository.SessionRepository
+import com.hermes.client.domain.Session
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -120,6 +121,35 @@ class ChatViewModelTest {
 
         assertEquals("coding-prod", vm.currentModel.value)
         assertEquals("moa", vm.currentProvider.value)
+    }
+
+    // On open, the picker must seed from the session's resolved provider (e.g. a MoA preset under
+    // "moa") — not the gateway's global default. A vendor-prefixed model string ("moa/coding-prod")
+    // is stripped to the bare preset name for display, and the provider slug is surfaced directly.
+    @Test fun open_seeds_picker_from_session_provider() = runTest {
+        coEvery { sessionRepo.get("s1", null) } returns Session(
+            id = "s1", title = "t", model = "moa/coding-prod", provider = "moa",
+            messageCount = 1, profile = null,
+        )
+        val vm = buildVm()
+        vm.open("s1")
+        advanceUntilIdle()
+
+        assertEquals("moa", vm.currentProvider.value)
+        assertEquals("coding-prod", vm.currentModel.value)
+    }
+
+    // A bare (unprefixed) model string with a resolved provider must seed both fields directly.
+    @Test fun open_seeds_picker_from_bare_session_model() = runTest {
+        coEvery { sessionRepo.get("s1", null) } returns Session(
+            id = "s1", title = "t", model = "coding-prod", provider = "moa",
+            messageCount = 1, profile = null,
+        )
+        val vm = buildVm()
+        vm.open("s1"); advanceUntilIdle()
+
+        assertEquals("moa", vm.currentProvider.value)
+        assertEquals("coding-prod", vm.currentModel.value)
     }
 
     /**
