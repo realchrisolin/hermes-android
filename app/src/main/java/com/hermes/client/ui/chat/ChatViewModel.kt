@@ -181,11 +181,15 @@ class ChatViewModel @Inject constructor(
             launch { runCatching { _commands.value = chat.commandsCatalog() } }
             // Surface the gateway's currently-resolved model/provider in the top-bar chip. Fetched
             // on open (before any in-session switch) so the chip never rests on the "Model" stub.
+            // This is a FALLBACK only: if a session-scoped model was already seeded (e.g. a MoA
+            // preset from the session detail endpoint), leave it alone.
             launch {
                 runCatching { chat.currentModelInfo() }
                     .onSuccess { (model, provider) ->
-                        _currentModel.value = model.ifBlank { null }
-                        _currentProvider.value = provider
+                        if (_currentModel.value == null) {
+                            _currentModel.value = model.ifBlank { null }
+                            _currentProvider.value = provider
+                        }
                     }
             }
         }
