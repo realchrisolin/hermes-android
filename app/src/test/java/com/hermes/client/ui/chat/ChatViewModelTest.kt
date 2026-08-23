@@ -59,6 +59,7 @@ class ChatViewModelTest {
         every { favoritesStore.favorites } returns MutableStateFlow(emptySet())
         every { tts.speaking } returns MutableStateFlow(false)
         every { promptStore.prompts } returns MutableStateFlow(emptyList())
+        coEvery { chatRepo.currentModelInfo() } returns ("" to null)
     }
 
     private fun buildVm() = ChatViewModel(chatRepo, sessionRepo, modelRepo, profileRepo, profileManager, favoritesStore, pendingShareStore, tts, promptStore, configRepo)
@@ -108,6 +109,17 @@ class ChatViewModelTest {
         vm.open("s1")
         advanceUntilIdle()
         coVerify { chatRepo.resume("s1", "personal") }
+    }
+
+    /** open() must surface the gateway's resolved model/provider so the top-bar chip never rests on "Model". */
+    @Test fun open_populates_current_model_and_provider() = runTest {
+        coEvery { chatRepo.currentModelInfo() } returns ("coding-prod" to "moa")
+        val vm = buildVm()
+        vm.open("s1")
+        advanceUntilIdle()
+
+        assertEquals("coding-prod", vm.currentModel.value)
+        assertEquals("moa", vm.currentProvider.value)
     }
 
     /**

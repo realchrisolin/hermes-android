@@ -47,9 +47,9 @@ class ChatViewModel @Inject constructor(
     private val _unauthorized = MutableStateFlow(false)
     val unauthorized: StateFlow<Boolean> = _unauthorized.asStateFlow()
 
-    // The model this session is confirmed to be using. Null until a switch succeeds (the gateway
-    // doesn't report the session's current model up-front), so the picker shows "Model" until the
-    // user changes it, then the chosen model as confirmation the switch took.
+    // The model this session is currently using. Populated on open from the gateway's resolved
+    // model (config.get) and re-confirmed on a successful switch; null until that first fetch
+    // resolves (or when the gateway reports none), so the chip falls back to "Model" in that window.
     private val _currentModel = MutableStateFlow<String?>(null)
     val currentModel: StateFlow<String?> = _currentModel.asStateFlow()
 
@@ -160,6 +160,15 @@ class ChatViewModel @Inject constructor(
             launch { runCatching { _providers.value = modelRepo.providers() } }
             launch { runCatching { _profiles.value = profileRepo.list() } }
             launch { runCatching { _commands.value = chat.commandsCatalog() } }
+            // Surface the gateway's currently-resolved model/provider in the top-bar chip. Fetched
+            // on open (before any in-session switch) so the chip never rests on the "Model" stub.
+            launch {
+                runCatching { chat.currentModelInfo() }
+                    .onSuccess { (model, provider) ->
+                        _currentModel.value = model.ifBlank { null }
+                        _currentProvider.value = provider
+                    }
+            }
         }
         collectJob?.cancel()
         collectJob = viewModelScope.launch {

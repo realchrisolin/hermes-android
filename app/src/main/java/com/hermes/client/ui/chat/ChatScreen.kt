@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -53,7 +54,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import com.hermes.client.ui.theme.LocalProfileAccent
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -256,10 +256,30 @@ fun ChatScreen(
                             tint = com.hermes.client.ui.components.AccentChrome.onBar,
                         )
                     }
+                    Spacer(Modifier.width(4.dp))
                     AssistChip(
                         onClick = { modelSheetOpen = true },
-                        modifier = Modifier.minimumInteractiveComponentSize(),
-                        label = { Text(currentModel ?: "Model", maxLines = 1) },
+                        modifier = Modifier.widthIn(min = 132.dp, max = 224.dp),
+                        label = {
+                            val provider = currentProvider
+                            Column(horizontalAlignment = Alignment.Start) {
+                                if (!provider.isNullOrBlank()) {
+                                    Text(
+                                        provider,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = androidx.compose.material3.LocalContentColor.current.copy(alpha = 0.65f),
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Text(
+                                    currentModel ?: "Model",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                )
+                            }
+                        },
                         trailingIcon = {
                             Icon(
                                 Icons.Rounded.ArrowDropDown,
@@ -272,6 +292,7 @@ fun ChatScreen(
                             trailingIconContentColor = com.hermes.client.ui.components.AccentChrome.onBar,
                         ),
                     )
+                    Spacer(Modifier.width(8.dp))
                     StatusDot(connState)
                     Box {
                         IconButton(onClick = { transcriptMenu = true }) {

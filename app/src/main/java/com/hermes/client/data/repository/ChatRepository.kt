@@ -60,6 +60,24 @@ class ChatRepository(private val client: HermesGatewayClient) {
         return result.jsonObject["session_id"]?.jsonPrimitive?.content
     }
 
+    /**
+     * The gateway's currently-resolved model + provider, via the `config.get` RPC. The gateway
+     * reports the model as a (possibly) provider-prefixed string (e.g. "moa/coding-prod"); strip
+     * the redundant prefix when it matches the provider slug so the top-bar chip renders clean,
+     * non-redundant labels (provider above, bare model below).
+     */
+    suspend fun currentModelInfo(): Pair<String, String?> {
+        val result = client.call("config.get", buildJsonObject { put("key", "provider") })
+        val provider = result.jsonObject["provider"]?.jsonPrimitive?.content
+        val rawModel = result.jsonObject["model"]?.jsonPrimitive?.content ?: ""
+        val model = if (provider != null && rawModel.startsWith("$provider/")) {
+            rawModel.substringAfter("$provider/")
+        } else {
+            rawModel
+        }
+        return model to provider
+    }
+
     suspend fun submit(sessionId: String, text: String) {
         client.call("prompt.submit", buildJsonObject {
             put("session_id", sessionId)
