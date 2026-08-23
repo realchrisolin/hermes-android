@@ -29,6 +29,9 @@ import kotlinx.serialization.Serializable
 )
 @Serializable data class SessionListDto(val sessions: List<SessionDto> = emptyList())
 
+/** Single-session response from GET /api/sessions/{id}. */
+@Serializable data class SessionDetailDto(val session: SessionDto)
+
 /**
  * Cross-profile session list (`/api/profiles/sessions`). Unlike `/api/sessions?profile=`,
  * every session here carries its true `profile`, so the list can show all tenants at once
