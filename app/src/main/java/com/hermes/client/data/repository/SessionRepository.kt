@@ -72,6 +72,10 @@ class SessionRepository(private val rest: HermesRestApi) {
             m.copy(id = "h-$i-${m.id}")
         }
 
+    /** Fetch a single session's metadata (model + provider) for seeding the model picker. */
+    suspend fun get(sessionId: String, profile: String? = null): Session =
+        rest.getSession(sessionId, profile).toDomain()
+
     // All mutations carry the session's profile so the gateway hits the right per-profile DB
     // (otherwise the call 404s and the change silently no-ops).
     suspend fun rename(sessionId: String, title: String, profile: String?) =

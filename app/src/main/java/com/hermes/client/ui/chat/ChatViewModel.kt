@@ -157,7 +157,20 @@ class ChatViewModel @Inject constructor(
                 }
             }
             // Load model options, profiles, and the slash-command catalog; failures are non-fatal
-            launch { runCatching { _providers.value = modelRepo.providers() } }
+            launch {
+                runCatching { _providers.value = modelRepo.providers() }
+                // Seed the picker's current selection from this session's persisted model so the
+                // header shows the real model (not "Model") and the matching row is highlighted.
+                // The session API omits the provider, so recover it from the model string by
+                // matching against the just-loaded provider list (a MoA preset matches the "moa"
+                // provider's models; a vendor-prefixed string matches its aggregator slug).
+                runCatching {
+                    sessions.get(id, profileManager.active.value).model?.let { model ->
+                        _currentModel.value = model
+                        _currentProvider.value = _providers.value.firstOrNull { p -> model in p.models }?.slug
+                    }
+                }
+            }
             launch { runCatching { _profiles.value = profileRepo.list() } }
             launch { runCatching { _commands.value = chat.commandsCatalog() } }
         }

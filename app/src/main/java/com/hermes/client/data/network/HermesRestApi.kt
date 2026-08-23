@@ -89,6 +89,10 @@ class HermesRestApi(
     suspend fun messages(sessionId: String, profile: String? = null): List<MessageDto> =
         get<MessagesDto>("/api/sessions/$sessionId/messages${profileParam(profile, first = true)}").messages
 
+    /** Single-session metadata (model/provider) for seeding the model picker on open. */
+    suspend fun getSession(sessionId: String, profile: String? = null): SessionDto =
+        get<SessionDetailDto>("/api/sessions/$sessionId${profileParam(profile, first = true)}").session
+
     /** "&profile=x" (or "?profile=x" when [first]) — empty when profile is null/blank. */
     private fun profileParam(profile: String?, first: Boolean = false): String {
         if (profile.isNullOrBlank()) return ""
