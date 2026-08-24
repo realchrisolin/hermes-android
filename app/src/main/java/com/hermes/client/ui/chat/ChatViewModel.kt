@@ -61,6 +61,11 @@ class ChatViewModel @Inject constructor(
     private val _currentProvider = MutableStateFlow<String?>(null)
     val currentProvider: kotlinx.coroutines.flow.StateFlow<String?> = _currentProvider.asStateFlow()
 
+    // Session display title for the chat top bar. Seeded from GET /api/sessions/{id} on open;
+    // null until that fetch lands so the bar can fall back to "Chat".
+    private val _sessionTitle = MutableStateFlow<String?>(null)
+    val sessionTitle: StateFlow<String?> = _sessionTitle.asStateFlow()
+
     // Text handed off from a share (Share-to-Hermes). ChatScreen pre-fills the composer with it once.
     private val _initialDraft = MutableStateFlow<String?>(null)
     val initialDraft: StateFlow<String?> = _initialDraft.asStateFlow()
@@ -111,6 +116,7 @@ class ChatViewModel @Inject constructor(
 
     fun open(id: String) {
         sessionId = id
+        _sessionTitle.value = null
         connJob?.cancel()
         // A share created this session and stashed its text; surface it as the initial composer draft.
         val ps = pendingShareStore.take(id)
@@ -165,6 +171,8 @@ class ChatViewModel @Inject constructor(
                 // preset); fall back to matching the model string against the loaded provider list.
                 runCatching {
                     val session = sessions.get(id, profileManager.active.value)
+                    _sessionTitle.value = session.title.takeIf { it.isNotBlank() }
+                    com.hermes.client.data.diagnostics.DebugLog.log("session", "seeded model=${session.model} provider=${session.provider} title=${session.title}")
                     session.model?.takeIf { it.isNotBlank() }?.let { model ->
                         val provider = session.provider?.takeIf { it.isNotBlank() }
                         _currentProvider.value = provider

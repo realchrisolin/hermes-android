@@ -127,6 +127,18 @@ class ChatViewModelTest {
         assertEquals("coding-prod", vm.currentModel.value)
     }
 
+    @Test fun open_seeds_session_title() = runTest {
+        coEvery { sessionRepo.get("s1", null) } returns Session(
+            id = "s1", title = "Long session name", model = "coding-prod", provider = "moa",
+            messageCount = 1, profile = null,
+        )
+        val vm = buildVm()
+        vm.open("s1")
+        advanceUntilIdle()
+
+        assertEquals("Long session name", vm.sessionTitle.value)
+    }
+
     // A bare (unprefixed) model string with a resolved provider must seed both fields directly.
     @Test fun open_seeds_picker_from_bare_session_model() = runTest {
         coEvery { sessionRepo.get("s1", null) } returns Session(
