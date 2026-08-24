@@ -87,8 +87,15 @@ class ChatViewModelTest {
         val vm = buildVm()
         vm.open("s1")
         advanceUntilIdle()
-        // open() already called resume once; now simulate a reconnect cycle
+        // Simulate the initial connection succeeding (in production, openSocket() → gateway.ready
+        // would emit this; in the test the mock never does, so hasConnected remains false without it).
+        connectionStateFlow.value = ConnectionState.Connected
+        advanceUntilIdle()
+        // Now simulate a reconnect cycle: real production sequence goes
+        // Reconnecting → Connecting → Connected, not Reconnecting → Connected directly.
         connectionStateFlow.value = ConnectionState.Reconnecting
+        advanceUntilIdle()
+        connectionStateFlow.value = ConnectionState.Connecting
         advanceUntilIdle()
         connectionStateFlow.value = ConnectionState.Connected
         advanceUntilIdle()
@@ -110,6 +117,10 @@ class ChatViewModelTest {
         vm.open("s1")
         advanceUntilIdle()
 
+        // Simulate the initial connection succeeding (hasConnected must be true for reconnect to fire)
+        connectionStateFlow.value = ConnectionState.Connected
+        advanceUntilIdle()
+
         // Confirm the bug precondition: the initial fetch failed, so the top bar is still on fallback.
         assertEquals(null, vm.sessionTitle.value)
         assertEquals(null, vm.currentModel.value)
@@ -120,6 +131,8 @@ class ChatViewModelTest {
             messageCount = 1, profile = null,
         )
         connectionStateFlow.value = ConnectionState.Reconnecting
+        advanceUntilIdle()
+        connectionStateFlow.value = ConnectionState.Connecting
         advanceUntilIdle()
         connectionStateFlow.value = ConnectionState.Connected
         advanceUntilIdle()

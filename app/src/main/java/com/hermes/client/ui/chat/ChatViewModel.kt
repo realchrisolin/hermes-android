@@ -178,6 +178,7 @@ class ChatViewModel @Inject constructor(
         // C2 + I3: watch connection transitions
         connJob = viewModelScope.launch {
             var prev: ConnectionState? = null
+            var hasConnected: Boolean = false
             chat.connectionState.collect { cur ->
                 // I3: entering Reconnecting or Error while generating → mark interrupted
                 if ((cur is ConnectionState.Reconnecting || cur is ConnectionState.Error)
@@ -186,19 +187,22 @@ class ChatViewModel @Inject constructor(
                     _state.value = _state.value.markInterrupted()
                 }
                 // C2: reconnect cycle completed (Reconnecting → Connected) → re-attach agent stream
-                // Guard: prev must be Reconnecting (not null) to skip the very first Connected transition
-                if (cur is ConnectionState.Connected && prev is ConnectionState.Reconnecting) {
-                    launch {
-                        runCatching { chat.resume(sessionId, profileManager.active.value) }
-                            .getOrNull()?.let { sessionId = it }
+                // Guard: hasConnected tracks whether we've had a previous Connected transition,
+                // skipping the very first one (which is the initial connection from open(), where
+                // resume() and refreshSessionMeta() are already called inline). Every subsequent
+                // Connected — whether from auto-backoff recovery or a manual Retry — must re-arm
+                // the session handle and repopulate the top bar's title/model, since the original
+                // open()-time fetch may have failed silently (gateway unreachable at that moment)
+                // or the session state may have changed on the server.
+                if (cur is ConnectionState.Connected) {
+                    if (hasConnected) {
+                        launch {
+                            runCatching { chat.resume(sessionId, profileManager.active.value) }
+                                .getOrNull()?.let { sessionId = it }
+                        }
+                        launch { refreshSessionMeta(sessionId) }
                     }
-                    // The initial open()-time fetch of session title/model may have failed silently
-                    // if the gateway was unreachable at that moment (runCatching swallows it) — that
-                    // window is exactly "offline at open, connects after Retry". Nothing else re-arms
-                    // that fetch, so without this the top bar stays frozen on "Chat"/"Model" even
-                    // after the socket recovers. Re-run it here so recovery is complete, not just
-                    // the message stream.
-                    launch { refreshSessionMeta(sessionId) }
+                    hasConnected = true
                 }
                 prev = cur
             }

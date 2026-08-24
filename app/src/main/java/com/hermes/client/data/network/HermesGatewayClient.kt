@@ -23,6 +23,7 @@ import okhttp3.WebSocketListener
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 import kotlin.math.pow
 
@@ -62,6 +63,12 @@ open class HermesGatewayClient(
     // ignored once a newer socket has been opened, so an in-flight backoff reopen can never
     // race a manual reconnectNow() into two live sockets.
     private val generation = AtomicInteger(0)
+    // Guards against concurrent connect() calls racing past the state check before either
+    // openSocket() sets Connecting. Multiple callers (GatewayConnectionService, ChatViewModel)
+    // may call connect() on the shared singleton at startup; without this guard, both pass the
+    // idempotency check simultaneously and open two WebSockets that race each other, with only
+    // one winning the generation slot and the other leaking silently.
+    private val socketOpening = AtomicBoolean(false)
 
     // Readiness gate: awaited by call() before sending RPCs.
     // Recreated (uncompleted) on each openSocket(); completed when gateway.ready arrives;
@@ -74,15 +81,11 @@ open class HermesGatewayClient(
 
     fun connect() {
         // Idempotent: multiple owners (the foreground service, view models, etc.) may all call
-        // connect() on this shared singleton. If a socket is already open, or a connect/backoff
-        // reconnect is already in flight, this must be a no-op — otherwise a second openSocket()
-        // would leak a duplicate live WebSocket that the generation check only shadows, never
-        // closes. reconnectNow() intentionally bypasses this guard to force a fresh socket.
-        val cur = _state.value
-        if (cur is ConnectionState.Connecting || cur is ConnectionState.Connected ||
-            cur is ConnectionState.Reconnecting
-        ) {
-            DebugLog.log("ws", "connect() no-op — already $cur")
+        // connect() on this shared singleton. Without the AtomicBoolean guard, both callers can
+        // race past the state check before openSocket() sets Connecting — double-opening and
+        // leaking a WebSocket. reconnectNow() bypasses this guard intentionally.
+        if (!socketOpening.compareAndSet(false, true)) {
+            DebugLog.log("ws", "connect() no-op — already connecting")
             return
         }
         manuallyClosed = false
@@ -173,6 +176,7 @@ open class HermesGatewayClient(
     protected open fun onSocketClosed(gen: Int, reason: String) {
         // A newer socket has superseded this one (e.g. reconnectNow()) — ignore its death.
         if (gen != generation.get()) return
+        socketOpening.set(false)
         DebugLog.log("ws", "socket closed (gen=$gen): $reason")
         // Fail any call() that is currently awaiting readiness so it throws immediately.
         readyGate.completeExceptionally(GatewayRpcException(0, reason))
@@ -220,6 +224,7 @@ open class HermesGatewayClient(
 
     fun close() {
         manuallyClosed = true
+        socketOpening.set(false)
         // Fail any call() awaiting readiness so it throws immediately rather than hanging.
         readyGate.completeExceptionally(GatewayRpcException(0, "client closing"))
         failAllPending("client closing")
@@ -231,6 +236,7 @@ open class HermesGatewayClient(
     /** Immediately cancel the underlying socket (no graceful close handshake). */
     internal fun cancelNow() {
         manuallyClosed = true
+        socketOpening.set(false)
         readyGate.completeExceptionally(GatewayRpcException(0, "client cancelled"))
         ws?.cancel()
         ws = null
