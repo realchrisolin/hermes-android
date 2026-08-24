@@ -53,7 +53,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.rememberModalBottomSheetState
 import com.hermes.client.ui.theme.LocalProfileAccent
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -297,8 +297,27 @@ fun ChatScreen(
                     Spacer(Modifier.width(8.dp))
                     AssistChip(
                         onClick = { modelSheetOpen = true },
-                        modifier = Modifier.minimumInteractiveComponentSize(),
-                        label = { Text(currentModel ?: "Model", maxLines = 1) },
+                        modifier = Modifier.widthIn(min = 132.dp, max = 224.dp),
+                        label = {
+                            val provider = currentProvider
+                            Column(horizontalAlignment = Alignment.Start) {
+                                if (!provider.isNullOrBlank()) {
+                                    Text(
+                                        provider,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = com.hermes.client.ui.components.AccentChrome.onBar.copy(alpha = 0.65f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Text(
+                                    currentModel ?: "Model",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        },
                         trailingIcon = {
                             Icon(
                                 Icons.Rounded.ArrowDropDown,
