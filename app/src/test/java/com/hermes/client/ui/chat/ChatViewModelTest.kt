@@ -14,6 +14,7 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -63,6 +64,24 @@ class ChatViewModelTest {
     }
 
     private fun buildVm() = ChatViewModel(chatRepo, sessionRepo, modelRepo, profileRepo, profileManager, favoritesStore, pendingShareStore, tts, promptStore, configRepo)
+
+    /**
+     * Bug: open() called chat.resume() without first calling chat.connect(). Resume needs a live
+     * socket; the only other thing that opens one is the background GatewayConnectionService,
+     * which may not be running (e.g. notification permission not granted, or the process was
+     * restarted headlessly). Without an explicit connect() here, opening an existing session in
+     * that state resumes against no socket at all and the chat is stuck "offline" until a manual
+     * retry. connect() is idempotent, so calling it unconditionally in open() is safe even when
+     * the service already owns a live connection.
+     */
+    @Test fun open_connects_before_resuming() = runTest {
+        val vm = buildVm()
+        vm.open("s1")
+        advanceUntilIdle()
+
+        verify(exactly = 1) { chatRepo.connect() }
+        coVerify(exactly = 1) { chatRepo.resume("s1", null) }
+    }
 
     @Test fun streamed_delta_appears_in_state() = runTest {
         val vm = buildVm()

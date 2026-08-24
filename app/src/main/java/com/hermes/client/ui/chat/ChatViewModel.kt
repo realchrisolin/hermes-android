@@ -123,6 +123,10 @@ class ChatViewModel @Inject constructor(
         _sessionIdOriginal = id
         _sessionTitle.value = null
         connJob?.cancel()
+        // connect() first — resume() needs the live socket, and the notification service that
+        // normally owns the connection may not be running (e.g. POST_NOTIFICATIONS not granted),
+        // which would leave the chat "offline" until a manual retry. connect() is idempotent.
+        chat.connect()
         // A share created this session and stashed its text; surface it as the initial composer draft.
         val ps = pendingShareStore.take(id)
         ps?.text?.let { _initialDraft.value = it }
