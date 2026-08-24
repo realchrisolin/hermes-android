@@ -10,6 +10,9 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -70,6 +73,10 @@ open class HermesGatewayClient(
     // one winning the generation slot and the other leaking silently.
     private val socketOpening = AtomicBoolean(false)
 
+    // Periodic heartbeat that sends WebSocket ping frames and checks for pong timeouts.
+    // Restarted on each successful connection (gateway.ready) and cancelled on close.
+    private var heartbeatJob: Job? = null
+
     // Readiness gate: awaited by call() before sending RPCs.
     // Recreated (uncompleted) on each openSocket(); completed when gateway.ready arrives;
     // completed exceptionally when socket closes/fails or close() is called.
@@ -77,7 +84,18 @@ open class HermesGatewayClient(
 
     private companion object {
         const val READY_TIMEOUT_MS = 15_000L
+        /** How often to send a WebSocket ping frame to detect half-open connections. */
+        const val HEARTBEAT_INTERVAL_MS = 15_000L
+        /**
+         * If no pong is received within this window after the most recent ping, the connection is
+         * presumed dead (half-open / silently dropped by a gateway or load balancer) and the socket
+         * is closed to trigger an automatic backoff-reconnect cycle.
+         */
+        const val HEARTBEAT_TIMEOUT_MS = 10_000L
     }
+
+    /** Timestamp of the most recent WebSocket frame received (any type). Used by startHeartbeat(). */
+    @Volatile private var lastMessageMs = 0L
 
     fun connect() {
         // Idempotent: multiple owners (the foreground service, view models, etc.) may all call
@@ -129,6 +147,46 @@ open class HermesGatewayClient(
         old?.cancel()
     }
 
+    /**
+     * Start (or restart) a periodic liveness check that verifies the WebSocket is still responsive.
+     * Every [HEARTBEAT_INTERVAL_MS] it sends a lightweight JSON-RPC-style text message; if the
+     * underlying OkHttp WebSocket rejects it (returns false), or if no data frame of any kind has
+     * arrived from the server within [HEARTBEAT_TIMEOUT_MS], the socket is presumed dead — the
+     * TCP connection may have been silently dropped by a gateway, load balancer idle timeout, or
+     * network middlebox while the client-side socket still appears healthy. Closing it triggers
+     * the existing onSocketClosed -> backoff -> openSocket cycle for automatic recovery.
+     *
+     * The initial `lastMessageMs` is set to `now` so the first timeout check is skipped — there
+     * has not yet been time for the first server-originated frame to arrive.
+     */
+    private fun startHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = scope.launch {
+            lastMessageMs = System.currentTimeMillis()
+            while (isActive) {
+                delay(HEARTBEAT_INTERVAL_MS)
+                if (manuallyClosed) break
+                val ws = this@HermesGatewayClient.ws ?: continue
+                if (_state.value != ConnectionState.Connected) continue
+
+                val elapsed = System.currentTimeMillis() - lastMessageMs
+                if (elapsed > HEARTBEAT_TIMEOUT_MS) {
+                    DebugLog.log("ws", "heartbeat timeout (${elapsed}ms since last frame) — closing")
+                    ws.close(1000, "heartbeat timeout")
+                    continue
+                }
+
+                // Send a minimal text frame as a liveness probe. If the underlying socket is
+                // dead, okHttp will reject it (return false).
+                val sent = ws.send("{\"type\":\"ping\"}")
+                if (!sent) {
+                    DebugLog.log("ws", "heartbeat ping rejected — socket dead, closing")
+                    ws.close(1000, "socket dead")
+                }
+            }
+        }
+    }
+
     private fun makeListener(gen: Int) = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             // Do NOT set state to Connected here. Wait for gateway.ready event.
@@ -137,6 +195,7 @@ open class HermesGatewayClient(
 
         override fun onMessage(webSocket: WebSocket, text: String) {
             if (gen != generation.get()) return // superseded socket — drop late frames
+            lastMessageMs = System.currentTimeMillis()
             text.lineSequence().filter { it.isNotBlank() }.forEach { line ->
                 when (val msg = parseInbound(json, line)) {
                     is RpcResult -> pending.remove(msg.id)?.complete(msg.result)
@@ -151,6 +210,8 @@ open class HermesGatewayClient(
                             attempt.set(0)
                             _state.value = ConnectionState.Connected
                             readyGate.complete(Unit)
+                            // Start the heartbeat pinger now that the connection is live.
+                            startHeartbeat()
                         }
                         // Log every event except the high-frequency streaming deltas, so the
                         // diagnostic trail stays readable while still capturing errors,
@@ -224,6 +285,7 @@ open class HermesGatewayClient(
 
     fun close() {
         manuallyClosed = true
+        heartbeatJob?.cancel()
         socketOpening.set(false)
         // Fail any call() awaiting readiness so it throws immediately rather than hanging.
         readyGate.completeExceptionally(GatewayRpcException(0, "client closing"))
@@ -237,6 +299,7 @@ open class HermesGatewayClient(
     internal fun cancelNow() {
         manuallyClosed = true
         socketOpening.set(false)
+        heartbeatJob?.cancel()
         readyGate.completeExceptionally(GatewayRpcException(0, "client cancelled"))
         ws?.cancel()
         ws = null
