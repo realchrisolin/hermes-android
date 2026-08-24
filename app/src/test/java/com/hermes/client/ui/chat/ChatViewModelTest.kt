@@ -98,6 +98,38 @@ class ChatViewModelTest {
     }
 
     /**
+     * Bug: opening a session while the gateway is unreachable leaves sessionTitle/currentModel at
+     * their fallback values ("Chat"/"Model") — the open()-time seed fetch is wrapped in runCatching
+     * and nothing re-arms it. A user who taps Retry gets the message stream back (resume() is
+     * called again) but the top bar stays frozen, because nothing previously re-ran the session
+     * metadata fetch on reconnect. This asserts the fetch is retried on Reconnecting → Connected.
+     */
+    @Test fun reconnect_refreshes_session_title_and_model_after_initial_fetch_failure() = runTest {
+        coEvery { sessionRepo.get("s1", null) } throws RuntimeException("gateway unreachable")
+        val vm = buildVm()
+        vm.open("s1")
+        advanceUntilIdle()
+
+        // Confirm the bug precondition: the initial fetch failed, so the top bar is still on fallback.
+        assertEquals(null, vm.sessionTitle.value)
+        assertEquals(null, vm.currentModel.value)
+
+        // Gateway becomes reachable again; the session fetch now succeeds.
+        coEvery { sessionRepo.get("s1", null) } returns Session(
+            id = "s1", title = "Recovered session", model = "moa/coding-prod", provider = "moa",
+            messageCount = 1, profile = null,
+        )
+        connectionStateFlow.value = ConnectionState.Reconnecting
+        advanceUntilIdle()
+        connectionStateFlow.value = ConnectionState.Connected
+        advanceUntilIdle()
+
+        assertEquals("Recovered session", vm.sessionTitle.value)
+        assertEquals("moa", vm.currentProvider.value)
+        assertEquals("coding-prod", vm.currentModel.value)
+    }
+
+    /**
      * Profile bug: session-scoped WebSocket RPCs must carry the active profile, or the gateway
      * resolves session.resume against the wrong profile's DB and returns "session not found"
      * (4007) — which then makes the next prompt.submit fail too. open() must pass the active

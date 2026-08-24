@@ -163,28 +163,7 @@ class ChatViewModel @Inject constructor(
                 }
             }
             // Load model options, profiles, and the slash-command catalog; failures are non-fatal
-            launch {
-                runCatching { _providers.value = modelRepo.providers() }
-                // Seed the picker's current selection from this session's persisted model so the
-                // header shows the real model (not "Model") and the matching row is highlighted.
-                // Prefer the provider the session detail endpoint resolves (e.g. "moa" for a MoA
-                // preset); fall back to matching the model string against the loaded provider list.
-                runCatching {
-                    val session = sessions.get(id, profileManager.active.value)
-                    _sessionTitle.value = session.title.takeIf { it.isNotBlank() }
-                    com.hermes.client.data.diagnostics.DebugLog.log("session", "seeded model=${session.model} provider=${session.provider} title=${session.title}")
-                    session.model?.takeIf { it.isNotBlank() }?.let { model ->
-                        val provider = session.provider?.takeIf { it.isNotBlank() }
-                        _currentProvider.value = provider
-                            ?: _providers.value.firstOrNull { p -> model in p.models }?.slug
-                        _currentModel.value = if (provider != null && model.startsWith("$provider/")) {
-                            model.substringAfter("$provider/")
-                        } else {
-                            model
-                        }
-                    }
-                }
-            }
+            launch { refreshSessionMeta(id) }
             launch { runCatching { _profiles.value = profileRepo.list() } }
             launch { runCatching { _commands.value = chat.commandsCatalog() } }
         }
@@ -213,8 +192,46 @@ class ChatViewModel @Inject constructor(
                         runCatching { chat.resume(sessionId, profileManager.active.value) }
                             .getOrNull()?.let { sessionId = it }
                     }
+                    // The initial open()-time fetch of session title/model may have failed silently
+                    // if the gateway was unreachable at that moment (runCatching swallows it) — that
+                    // window is exactly "offline at open, connects after Retry". Nothing else re-arms
+                    // that fetch, so without this the top bar stays frozen on "Chat"/"Model" even
+                    // after the socket recovers. Re-run it here so recovery is complete, not just
+                    // the message stream.
+                    launch { refreshSessionMeta(sessionId) }
                 }
                 prev = cur
+            }
+        }
+    }
+
+    /**
+     * Seed the top-bar's session title and model/provider chip from the gateway. Called once from
+     * open() and again whenever the socket recovers from a Reconnecting→Connected cycle: the
+     * open()-time call is wrapped in runCatching (deliberately non-fatal), so if the gateway was
+     * unreachable at that exact moment — offline at open, connects after Retry — the fetch fails
+     * silently and nothing else re-arms it. Without a second call here, the title/model stay frozen
+     * on their fallback text ("Chat"/"Model") even after the message stream itself recovers.
+     */
+    private suspend fun refreshSessionMeta(id: String) {
+        runCatching { _providers.value = modelRepo.providers() }
+        // Seed the picker's current selection from this session's persisted model so the
+        // header shows the real model (not "Model") and the matching row is highlighted.
+        // Prefer the provider the session detail endpoint resolves (e.g. "moa" for a MoA
+        // preset); fall back to matching the model string against the loaded provider list.
+        runCatching {
+            val session = sessions.get(id, profileManager.active.value)
+            _sessionTitle.value = session.title.takeIf { it.isNotBlank() }
+            com.hermes.client.data.diagnostics.DebugLog.log("session", "seeded model=${session.model} provider=${session.provider} title=${session.title}")
+            session.model?.takeIf { it.isNotBlank() }?.let { model ->
+                val provider = session.provider?.takeIf { it.isNotBlank() }
+                _currentProvider.value = provider
+                    ?: _providers.value.firstOrNull { p -> model in p.models }?.slug
+                _currentModel.value = if (provider != null && model.startsWith("$provider/")) {
+                    model.substringAfter("$provider/")
+                } else {
+                    model
+                }
             }
         }
     }
