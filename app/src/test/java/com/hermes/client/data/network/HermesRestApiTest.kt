@@ -98,6 +98,35 @@ class HermesRestApiTest {
         assertFalse(result)
     }
 
+    @Test fun getSession_parses_wrapped_aiohttp_shape() = runTest {
+        serverRule.server.enqueue(MockResponse.Builder().code(200).body(
+            """{"object":"hermes.session","session":{"id":"s1","title":"Wrapped","model":"grok-4.6","message_count":4}}"""
+        ).build())
+
+        val s = api(serverRule.server).getSession("s1")
+        assertEquals("s1", s.sessionId)
+        assertEquals("Wrapped", s.title)
+        assertEquals("grok-4.6", s.model)
+        assertEquals(4, s.messageCount)
+    }
+
+    /**
+     * FastAPI dashboard: no {session:...} wrapper, provider lives under billing_provider,
+     * and `model` is frequently JSON null. getSession must not throw on the null.
+     */
+    @Test fun getSession_parses_raw_dashboard_row_with_null_model() = runTest {
+        serverRule.server.enqueue(MockResponse.Builder().code(200).body(
+            """{"id":"s1","title":"Named session","model":null,"billing_provider":"deepinfra","model_config":"{\"model\":\"anthropic/claude-sonnet-5\"}","message_count":5,"last_active":1724469200.0}"""
+        ).build())
+
+        val s = api(serverRule.server).getSession("s1")
+        assertEquals("s1", s.sessionId)
+        assertEquals("Named session", s.title)
+        assertEquals(null, s.model)
+        assertEquals("deepinfra", s.billingProvider)
+        assertTrue(s.modelConfig!!.contains("claude-sonnet-5"))
+    }
+
     @Test fun setActiveProfile_posts_to_correct_endpoint_with_token_and_name() = runTest {
         serverRule.server.enqueue(MockResponse.Builder().code(200).body("{}").build())
 

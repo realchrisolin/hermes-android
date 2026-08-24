@@ -50,9 +50,9 @@ class ChatViewModelTest {
         Dispatchers.setMain(StandardTestDispatcher())
         every { chatRepo.events } returns events
         every { chatRepo.connectionState } returns connectionStateFlow
-        // resume returns null here so the ViewModel keeps the opened id stable for these tests
-        // (production switches to the live handle resume returns).
-        coEvery { chatRepo.resume(any(), any()) } returns null
+        // resume returns an empty result here so the ViewModel keeps the opened id stable for
+        // these tests (production switches to the live handle resume returns).
+        coEvery { chatRepo.resume(any(), any()) } returns com.hermes.client.data.repository.SessionResumeResult(null, null, null, null)
         every { profileManager.active } returns MutableStateFlow<String?>(null)
         coEvery { sessionRepo.history(any(), any()) } returns emptyList()
         coEvery { modelRepo.options() } returns emptyList()
@@ -191,6 +191,27 @@ class ChatViewModelTest {
         assertEquals("coding-prod", vm.currentModel.value)
     }
 
+    /**
+     * Primary seed path: session.resume already returns model/provider/title in its `info`
+     * block. REST may fail (shape mismatch, unreachable) and must not block the top bar.
+     */
+    @Test fun open_seeds_title_and_model_from_resume_info_when_rest_fails() = runTest {
+        coEvery { sessionRepo.get("s1", null) } throws RuntimeException("decode failed")
+        coEvery { chatRepo.resume("s1", null) } returns com.hermes.client.data.repository.SessionResumeResult(
+            sessionId = "s1-live",
+            model = "grok-4.6",
+            provider = "xai-oauth",
+            title = "Named session",
+        )
+        val vm = buildVm()
+        vm.open("s1")
+        advanceUntilIdle()
+
+        assertEquals("Named session", vm.sessionTitle.value)
+        assertEquals("xai-oauth", vm.currentProvider.value)
+        assertEquals("grok-4.6", vm.currentModel.value)
+    }
+
     @Test fun open_seeds_session_title() = runTest {
         coEvery { sessionRepo.get("s1", null) } returns Session(
             id = "s1", title = "Long session name", model = "coding-prod", provider = "moa",
@@ -222,7 +243,7 @@ class ChatViewModelTest {
      * post-resume sessionId is at that time.
      */
     @Test fun open_stages_pending_share_image_as_attachment() = runTest {
-        coEvery { chatRepo.resume("s1", null) } returns "s1-live"
+        coEvery { chatRepo.resume("s1", null) } returns com.hermes.client.data.repository.SessionResumeResult("s1-live", null, null, null)
         pendingShareStore.put(
             "s1",
             // Valid base64 (decodes to "abc") — real decode logic runs in unit tests.

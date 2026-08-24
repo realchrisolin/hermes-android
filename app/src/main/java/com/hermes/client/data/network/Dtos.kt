@@ -26,11 +26,21 @@ import kotlinx.serialization.Serializable
     val source: String? = null,
     @SerialName("git_branch") val gitBranch: String? = null,
     @SerialName("git_repo_root") val gitRepoRoot: String? = null,
+    // Present on the FastAPI dashboard row; omitted by the aiohttp safe_keys filter.
+    // toDomain() resolves provider/model from these when the top-level fields are empty.
+    @SerialName("model_config") val modelConfig: String? = null,
+    @SerialName("billing_provider") val billingProvider: String? = null,
 )
 @Serializable data class SessionListDto(val sessions: List<SessionDto> = emptyList())
 
-/** Single-session response from GET /api/sessions/{id}. */
-@Serializable data class SessionDetailDto(val session: SessionDto)
+/** Single-session response from GET /api/sessions/{id}. Two different gateway server
+ * implementations exist for this route with different response shapes: the aiohttp
+ * dashboard server (hermes_cli/web_routers/sessions.py) returns the raw session row
+ * directly, while another (unused by the CLI `dashboard` command) wraps it as
+ * {"session": {...}}. Decode both: try the raw-row shape first (what `hermes dashboard`
+ * actually serves), falling back to the wrapped shape.
+ */
+@Serializable data class SessionDetailDto(val session: SessionDto? = null)
 
 /**
  * Cross-profile session list (`/api/profiles/sessions`). Unlike `/api/sessions?profile=`,

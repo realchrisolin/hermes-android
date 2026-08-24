@@ -7,6 +7,9 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
@@ -47,7 +50,17 @@ class HermesRestApi(
                 throw HermesApiException(resp.code, body.ifBlank { "HTTP ${resp.code}" })
             }
             com.hermes.client.data.diagnostics.DebugLog.log("rest", "GET $path ← ${resp.code}")
-            json.decodeFromString<T>(body)
+            try {
+                json.decodeFromString<T>(body)
+            } catch (e: Exception) {
+                // Log the actual body on a decode failure — a shape mismatch (missing/renamed
+                // field, wrapper change) is otherwise silently swallowed by callers wrapping
+                // this in runCatching, which makes the real cause invisible without a debug build.
+                com.hermes.client.data.diagnostics.DebugLog.log(
+                    "rest", "GET $path decode FAILED: ${e.message} body=${body.take(500)}",
+                )
+                throw e
+            }
         }
     }
 
@@ -89,9 +102,66 @@ class HermesRestApi(
     suspend fun messages(sessionId: String, profile: String? = null): List<MessageDto> =
         get<MessagesDto>("/api/sessions/$sessionId/messages${profileParam(profile, first = true)}").messages
 
-    /** Single-session metadata (model/provider) for seeding the model picker on open. */
-    suspend fun getSession(sessionId: String, profile: String? = null): SessionDto =
-        get<SessionDetailDto>("/api/sessions/$sessionId${profileParam(profile, first = true)}").session
+    /**
+     * Single-session metadata (model/provider/title) for seeding the top-bar/model picker on
+     * open. GET /api/sessions/{id} has two different response shapes depending on which gateway
+     * server is serving it: the `hermes dashboard` server (hermes_cli/web_routers/sessions.py)
+     * returns the raw session row directly with no wrapper and the provider under
+     * `billing_provider` (not `provider`); a different, unwrapped-vs-wrapped aiohttp
+     * implementation elsewhere returns `{"session": {...}}` with a real `provider` key. Parse the
+     * raw JSON directly instead of a single fixed DTO shape so both are handled.
+     */
+    suspend fun getSession(sessionId: String, profile: String? = null): SessionDto {
+        val raw = getRaw("/api/sessions/$sessionId${profileParam(profile, first = true)}")
+        val obj = raw.jsonObject
+        // Unwrap {"session": {...}} if present; otherwise the top-level object IS the row.
+        val row = obj["session"]?.let { runCatching { it.jsonObject }.getOrNull() } ?: obj
+        fun prim(vararg keys: String): JsonPrimitive? = keys.firstNotNullOfOrNull { k ->
+            row[k] as? JsonPrimitive
+        }?.takeUnless { it is kotlinx.serialization.json.JsonNull }
+        fun str(vararg keys: String): String? =
+            prim(*keys)?.contentOrNull?.takeIf { it.isNotBlank() }
+        val modelConfigEl = row["model_config"]
+        val modelConfig = when (modelConfigEl) {
+            null, kotlinx.serialization.json.JsonNull -> null
+            is JsonPrimitive -> modelConfigEl.contentOrNull?.takeIf { it.isNotBlank() }
+            is JsonObject -> modelConfigEl.toString()
+            else -> null
+        }
+        return SessionDto(
+            sessionId = str("id") ?: sessionId,
+            title = str("title"),
+            model = str("model"),
+            // Only the rare wire key "provider". billing_provider is a separate column and
+            // must not overwrite a MoA virtual provider resolved from model_config.
+            provider = str("provider"),
+            lastActive = prim("last_active", "last_activity_at")?.contentOrNull?.toDoubleOrNull(),
+            messageCount = prim("message_count")?.contentOrNull?.toIntOrNull() ?: 0,
+            profile = str("profile"),
+            isDefaultProfile = prim("is_default_profile")?.contentOrNull?.toBooleanStrictOrNull() ?: false,
+            archived = prim("archived")?.contentOrNull?.let { it == "1" || it == "true" } ?: false,
+            cwd = str("cwd"),
+            source = str("source"),
+            gitBranch = str("git_branch"),
+            gitRepoRoot = str("git_repo_root"),
+            modelConfig = modelConfig,
+            billingProvider = str("billing_provider"),
+        )
+    }
+
+    /** Raw JSON GET — for endpoints whose response shape varies across gateway server versions. */
+    private suspend fun getRaw(path: String): kotlinx.serialization.json.JsonElement = withContext(Dispatchers.IO) {
+        com.hermes.client.data.diagnostics.DebugLog.log("rest", "GET $path")
+        okHttp.newCall(builder(path).get().build()).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                com.hermes.client.data.diagnostics.DebugLog.log("rest", "GET $path ← ${resp.code} ${body.take(200)}")
+                throw HermesApiException(resp.code, body.ifBlank { "HTTP ${resp.code}" })
+            }
+            com.hermes.client.data.diagnostics.DebugLog.log("rest", "GET $path ← ${resp.code}")
+            json.parseToJsonElement(body)
+        }
+    }
 
     /** "&profile=x" (or "?profile=x" when [first]) — empty when profile is null/blank. */
     private fun profileParam(profile: String?, first: Boolean = false): String {
