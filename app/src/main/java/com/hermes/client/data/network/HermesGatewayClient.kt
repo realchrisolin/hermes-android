@@ -199,6 +199,7 @@ open class HermesGatewayClient(
                         // Handle gateway.ready: flip to Connected and open the readiness gate.
                         if (msg.event.type == "gateway.ready") {
                             attempt.set(0)
+                            socketOpening.set(false)
                             _state.value = ConnectionState.Connected
                             readyGate.complete(Unit)
                             // Start the heartbeat pinger now that the connection is live.
