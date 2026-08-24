@@ -148,16 +148,16 @@ open class HermesGatewayClient(
     }
 
     /**
-     * Start (or restart) a periodic liveness check that verifies the WebSocket is still responsive.
-     * Every [HEARTBEAT_INTERVAL_MS] it sends a lightweight JSON-RPC-style text message; if the
-     * underlying OkHttp WebSocket rejects it (returns false), or if no data frame of any kind has
-     * arrived from the server within [HEARTBEAT_TIMEOUT_MS], the socket is presumed dead — the
-     * TCP connection may have been silently dropped by a gateway, load balancer idle timeout, or
-     * network middlebox while the client-side socket still appears healthy. Closing it triggers
-     * the existing onSocketClosed -> backoff -> openSocket cycle for automatic recovery.
+     * Periodically check that the WebSocket is still alive by monitoring the time since the
+     * last frame arrived from the server. If no data frame of any kind arrives within
+     * [HEARTBEAT_TIMEOUT_MS], the connection is presumed half-open (silently dropped by a
+     * gateway, load balancer idle timeout, or network middlebox) and the socket is closed to
+     * trigger the existing backoff-reconnect cycle.
      *
-     * The initial `lastMessageMs` is set to `now` so the first timeout check is skipped — there
-     * has not yet been time for the first server-originated frame to arrive.
+     * This is purely passive — the gateway treats every incoming text frame as JSON-RPC, so
+     * we cannot send application-level ping frames without breaking the protocol.
+     *
+     * The initial `lastMessageMs` is set to `now` so the first timeout check is skipped.
      */
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
@@ -173,15 +173,6 @@ open class HermesGatewayClient(
                 if (elapsed > HEARTBEAT_TIMEOUT_MS) {
                     DebugLog.log("ws", "heartbeat timeout (${elapsed}ms since last frame) — closing")
                     ws.close(1000, "heartbeat timeout")
-                    continue
-                }
-
-                // Send a minimal text frame as a liveness probe. If the underlying socket is
-                // dead, okHttp will reject it (return false).
-                val sent = ws.send("{\"type\":\"ping\"}")
-                if (!sent) {
-                    DebugLog.log("ws", "heartbeat ping rejected — socket dead, closing")
-                    ws.close(1000, "socket dead")
                 }
             }
         }

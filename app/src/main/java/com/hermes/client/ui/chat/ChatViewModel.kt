@@ -111,11 +111,16 @@ class ChatViewModel @Inject constructor(
     val pathItems: StateFlow<List<com.hermes.client.data.repository.PathItem>> = _pathItems.asStateFlow()
 
     private var sessionId: String = ""
+    /** The original session ID passed to open(), preserved even after resume() replaces
+     *  sessionId with an ephemeral live handle. Used by refreshSessionMeta() on reconnect so
+     *  it fetches session data for the real server-side session, not the opaque handle. */
+    private var _sessionIdOriginal: String = ""
     private var collectJob: Job? = null
     private var connJob: Job? = null
 
     fun open(id: String) {
         sessionId = id
+        _sessionIdOriginal = id
         _sessionTitle.value = null
         connJob?.cancel()
         // A share created this session and stashed its text; surface it as the initial composer draft.
@@ -200,7 +205,7 @@ class ChatViewModel @Inject constructor(
                             runCatching { chat.resume(sessionId, profileManager.active.value) }
                                 .getOrNull()?.let { sessionId = it }
                         }
-                        launch { refreshSessionMeta(sessionId) }
+                        launch { refreshSessionMeta(_sessionIdOriginal) }
                     }
                     hasConnected = true
                 }
