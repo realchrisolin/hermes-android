@@ -202,7 +202,7 @@ class ChatViewModel @Inject constructor(
                 if (cur is ConnectionState.Connected) {
                     if (hasConnected) {
                         launch {
-                            runCatching { chat.resume(sessionId, profileManager.active.value) }
+                            runCatching { chat.resume(_sessionIdOriginal, profileManager.active.value) }
                                 .getOrNull()?.let { sessionId = it }
                         }
                         launch { refreshSessionMeta(_sessionIdOriginal) }

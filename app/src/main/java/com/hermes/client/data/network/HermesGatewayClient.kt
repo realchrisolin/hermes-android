@@ -94,9 +94,6 @@ open class HermesGatewayClient(
         const val HEARTBEAT_TIMEOUT_MS = 10_000L
     }
 
-    /** Timestamp of the most recent WebSocket frame received (any type). Used by startHeartbeat(). */
-    @Volatile private var lastMessageMs = 0L
-
     fun connect() {
         // Idempotent: multiple owners (the foreground service, view models, etc.) may all call
         // connect() on this shared singleton. Without the AtomicBoolean guard, both callers can
@@ -148,31 +145,28 @@ open class HermesGatewayClient(
     }
 
     /**
-     * Periodically check that the WebSocket is still alive by monitoring the time since the
-     * last frame arrived from the server. If no data frame of any kind arrives within
-     * [HEARTBEAT_TIMEOUT_MS], the connection is presumed half-open (silently dropped by a
-     * gateway, load balancer idle timeout, or network middlebox) and the socket is closed to
-     * trigger the existing backoff-reconnect cycle.
-     *
-     * This is purely passive — the gateway treats every incoming text frame as JSON-RPC, so
-     * we cannot send application-level ping frames without breaking the protocol.
-     *
-     * The initial `lastMessageMs` is set to `now` so the first timeout check is skipped.
+     * Periodically verify the WebSocket is genuinely alive by round-tripping a real JSON-RPC
+     * `ping` call (the gateway replies `{"pong": true}` — see HermesGatewayClientTest). An idle
+     * session can legitimately see zero server-initiated frames for minutes, so silence alone
+     * is not evidence of a dead connection; only a ping that goes unanswered within
+     * [HEARTBEAT_TIMEOUT_MS] proves the socket is half-open (silently dropped by a gateway,
+     * load balancer idle timeout, or network middlebox), and only then do we close it to trigger
+     * the existing backoff-reconnect cycle.
      */
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
-            lastMessageMs = System.currentTimeMillis()
             while (isActive) {
                 delay(HEARTBEAT_INTERVAL_MS)
                 if (manuallyClosed) break
-                val ws = this@HermesGatewayClient.ws ?: continue
                 if (_state.value != ConnectionState.Connected) continue
 
-                val elapsed = System.currentTimeMillis() - lastMessageMs
-                if (elapsed > HEARTBEAT_TIMEOUT_MS) {
-                    DebugLog.log("ws", "heartbeat timeout (${elapsed}ms since last frame) — closing")
-                    ws.close(1000, "heartbeat timeout")
+                val alive = runCatching {
+                    withTimeout(HEARTBEAT_TIMEOUT_MS) { call("ping", JsonObject(emptyMap())) }
+                }.isSuccess
+                if (!alive) {
+                    DebugLog.log("ws", "heartbeat ping unanswered within ${HEARTBEAT_TIMEOUT_MS}ms — closing")
+                    this@HermesGatewayClient.ws?.close(1000, "heartbeat timeout")
                 }
             }
         }
@@ -186,7 +180,6 @@ open class HermesGatewayClient(
 
         override fun onMessage(webSocket: WebSocket, text: String) {
             if (gen != generation.get()) return // superseded socket — drop late frames
-            lastMessageMs = System.currentTimeMillis()
             text.lineSequence().filter { it.isNotBlank() }.forEach { line ->
                 when (val msg = parseInbound(json, line)) {
                     is RpcResult -> pending.remove(msg.id)?.complete(msg.result)
