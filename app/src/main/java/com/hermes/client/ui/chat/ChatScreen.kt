@@ -1,12 +1,11 @@
 package com.hermes.client.ui.chat
-import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-
 import android.net.Uri
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.FileProvider
 import java.io.File
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -21,6 +20,7 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -53,7 +53,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.rememberModalBottomSheetState
 import com.hermes.client.ui.theme.LocalProfileAccent
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -80,6 +80,9 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -101,6 +104,7 @@ fun ChatScreen(
     val connState by vm.connectionState.collectAsStateWithLifecycle()
     val unauthorized by vm.unauthorized.collectAsStateWithLifecycle()
     val currentModel by vm.currentModel.collectAsStateWithLifecycle()
+    val sessionTitle by vm.sessionTitle.collectAsStateWithLifecycle()
     val providers by vm.providers.collectAsStateWithLifecycle()
     val favorites by vm.favorites.collectAsStateWithLifecycle()
     val currentProvider by vm.currentProvider.collectAsStateWithLifecycle()
@@ -240,26 +244,80 @@ fun ChatScreen(
 
     Scaffold(
         topBar = {
-            com.hermes.client.ui.components.HermesTopBar(
-                title = "Chat",
-                subtitle = activeProfile?.let { "Profile: $it" },
-                navigationIcon = {
-                    IconButton(onClick = onMenu) {
-                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { searchOpen = !searchOpen; if (!searchOpen) query = "" }) {
-                        Icon(
-                            androidx.compose.material.icons.Icons.Rounded.Search,
-                            contentDescription = "Search in chat",
-                            tint = com.hermes.client.ui.components.AccentChrome.onBar,
+            val accent = LocalProfileAccent.current
+            val dark = isSystemInDarkTheme()
+            val barBg = if (dark) accent.container else accent.accent
+            val barOn = if (dark) accent.onContainer else accent.onAccent
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(barBg)
+                    .statusBarsPadding()
+                    .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+            ) {
+                val profileName = activeProfile?.takeIf { it.isNotBlank() } ?: "default"
+                val title = sessionTitle?.takeIf { it.isNotBlank() } ?: "Chat"
+                // Separator only when the combined text is short enough that a bullet
+                // with even breathing room looks intentional rather than squeezed.
+                val showSeparator = profileName.length + title.length <= 20
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        profileName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = barOn.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (showSeparator) {
+                        Text(
+                            "\u2022",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = barOn.copy(alpha = 0.7f),
+                            modifier = Modifier.padding(horizontal = 6.dp),
                         )
                     }
+                    Text(
+                        title,
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = barOn,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    StatusDot(connState)
+                    Spacer(Modifier.width(8.dp))
                     AssistChip(
                         onClick = { modelSheetOpen = true },
-                        modifier = Modifier.minimumInteractiveComponentSize(),
-                        label = { Text(currentModel ?: "Model", maxLines = 1) },
+                        modifier = Modifier.widthIn(min = 132.dp, max = 224.dp),
+                        label = {
+                            val provider = currentProvider
+                            Column(horizontalAlignment = Alignment.Start) {
+                                if (!provider.isNullOrBlank()) {
+                                    Text(
+                                        provider,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = com.hermes.client.ui.components.AccentChrome.onBar.copy(alpha = 0.65f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Text(
+                                    currentModel ?: "Model",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        },
                         trailingIcon = {
                             Icon(
                                 Icons.Rounded.ArrowDropDown,
@@ -272,7 +330,15 @@ fun ChatScreen(
                             trailingIconContentColor = com.hermes.client.ui.components.AccentChrome.onBar,
                         ),
                     )
-                    StatusDot(connState)
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = { searchOpen = !searchOpen; if (!searchOpen) query = "" }) {
+                        Icon(
+                            androidx.compose.material.icons.Icons.Rounded.Search,
+                            contentDescription = "Search in chat",
+                            tint = com.hermes.client.ui.components.AccentChrome.onBar,
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
                     Box {
                         IconButton(onClick = { transcriptMenu = true }) {
                             Icon(
@@ -330,8 +396,9 @@ fun ChatScreen(
                             )
                         }
                     }
-                },
-            )
+                    Spacer(Modifier.weight(1f))
+                }
+            }
         },
         bottomBar = {
             Column(

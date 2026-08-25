@@ -6,12 +6,49 @@ import com.hermes.client.data.network.ProjectNodeDto
 import com.hermes.client.data.network.ProjectTreeDto
 import com.hermes.client.data.network.RepoDto
 import com.hermes.client.data.network.SessionDto
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 
-fun SessionDto.toDomain() = Session(
+private val modelConfigJson = Json { ignoreUnknownKeys = true; isLenient = true }
+private val bareBillingProviders = setOf("auto", "custom")
+
+private fun JsonPrimitive.nonBlank(): String? = content.takeIf { it.isNotBlank() }
+
+private data class ParsedModelConfig(
+    val model: String?,
+    val provider: String?,
+    val gatewayRuntimeProvider: String?,
+)
+
+private fun parseModelConfig(raw: String?): ParsedModelConfig? {
+    if (raw.isNullOrBlank()) return null
+    return runCatching {
+        val obj = modelConfigJson.parseToJsonElement(raw).jsonObject
+        val runtime = obj["gateway_runtime"] as? JsonObject
+        ParsedModelConfig(
+            model = (obj["model"] as? JsonPrimitive)?.nonBlank(),
+            provider = (obj["provider"] as? JsonPrimitive)?.nonBlank(),
+            gatewayRuntimeProvider = (runtime?.get("provider") as? JsonPrimitive)?.nonBlank(),
+        )
+    }.getOrNull()
+}
+
+fun SessionDto.toDomain(): Session {
+    val cfg = parseModelConfig(modelConfig)
+    val resolvedProvider = sequenceOf(
+        cfg?.gatewayRuntimeProvider,
+        cfg?.provider,
+        provider,
+        billingProvider?.takeUnless { it.lowercase() in bareBillingProviders },
+    ).firstOrNull { !it.isNullOrBlank() }
+    val resolvedModel = sequenceOf(cfg?.model, model).firstOrNull { !it.isNullOrBlank() }
+    return Session(
     id = sessionId,
     title = title?.ifBlank { "Untitled" } ?: "Untitled",
-    model = model,
-    provider = provider,
+    model = resolvedModel,
+    provider = resolvedProvider,
     messageCount = messageCount,
     // Normalize the default profile to a stable "default" label: the gateway may report it as
     // null or blank with is_default_profile=true, but grouping/pin-tokens/switching need one key.
@@ -23,7 +60,8 @@ fun SessionDto.toDomain() = Session(
     cwd = cwd?.ifBlank { null },
     gitBranch = gitBranch?.ifBlank { null },
     gitRepoRoot = gitRepoRoot?.ifBlank { null },
-)
+    )
+}
 
 fun MessageDto.toDomain() = ChatMessage(
     id = id?.toString() ?: "m-${hashCode()}",

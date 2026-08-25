@@ -9,10 +9,12 @@ import com.hermes.client.data.repository.ModelFavoritesStore
 import com.hermes.client.data.repository.ModelRepository
 import com.hermes.client.data.repository.ProfileRepository
 import com.hermes.client.data.repository.SessionRepository
+import com.hermes.client.domain.Session
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -48,9 +50,9 @@ class ChatViewModelTest {
         Dispatchers.setMain(StandardTestDispatcher())
         every { chatRepo.events } returns events
         every { chatRepo.connectionState } returns connectionStateFlow
-        // resume returns null here so the ViewModel keeps the opened id stable for these tests
-        // (production switches to the live handle resume returns).
-        coEvery { chatRepo.resume(any(), any()) } returns null
+        // resume returns an empty result here so the ViewModel keeps the opened id stable for
+        // these tests (production switches to the live handle resume returns).
+        coEvery { chatRepo.resume(any(), any()) } returns com.hermes.client.data.repository.SessionResumeResult(null, null, null, null)
         every { profileManager.active } returns MutableStateFlow<String?>(null)
         coEvery { sessionRepo.history(any(), any()) } returns emptyList()
         coEvery { modelRepo.options() } returns emptyList()
@@ -62,6 +64,24 @@ class ChatViewModelTest {
     }
 
     private fun buildVm() = ChatViewModel(chatRepo, sessionRepo, modelRepo, profileRepo, profileManager, favoritesStore, pendingShareStore, tts, promptStore, configRepo)
+
+    /**
+     * Bug: open() called chat.resume() without first calling chat.connect(). Resume needs a live
+     * socket; the only other thing that opens one is the background GatewayConnectionService,
+     * which may not be running (e.g. notification permission not granted, or the process was
+     * restarted headlessly). Without an explicit connect() here, opening an existing session in
+     * that state resumes against no socket at all and the chat is stuck "offline" until a manual
+     * retry. connect() is idempotent, so calling it unconditionally in open() is safe even when
+     * the service already owns a live connection.
+     */
+    @Test fun open_connects_before_resuming() = runTest {
+        val vm = buildVm()
+        vm.open("s1")
+        advanceUntilIdle()
+
+        verify(exactly = 1) { chatRepo.connect() }
+        coVerify(exactly = 1) { chatRepo.resume("s1", null) }
+    }
 
     @Test fun streamed_delta_appears_in_state() = runTest {
         val vm = buildVm()
@@ -86,14 +106,59 @@ class ChatViewModelTest {
         val vm = buildVm()
         vm.open("s1")
         advanceUntilIdle()
-        // open() already called resume once; now simulate a reconnect cycle
+        // Simulate the initial connection succeeding (in production, openSocket() → gateway.ready
+        // would emit this; in the test the mock never does, so hasConnected remains false without it).
+        connectionStateFlow.value = ConnectionState.Connected
+        advanceUntilIdle()
+        // Now simulate a reconnect cycle: real production sequence goes
+        // Reconnecting → Connecting → Connected, not Reconnecting → Connected directly.
         connectionStateFlow.value = ConnectionState.Reconnecting
+        advanceUntilIdle()
+        connectionStateFlow.value = ConnectionState.Connecting
         advanceUntilIdle()
         connectionStateFlow.value = ConnectionState.Connected
         advanceUntilIdle()
 
         // resume must have been called exactly twice: once in open(), once on reconnect
         coVerify(exactly = 2) { chatRepo.resume("s1", null) }
+    }
+
+    /**
+     * Bug: opening a session while the gateway is unreachable leaves sessionTitle/currentModel at
+     * their fallback values ("Chat"/"Model") — the open()-time seed fetch is wrapped in runCatching
+     * and nothing re-arms it. A user who taps Retry gets the message stream back (resume() is
+     * called again) but the top bar stays frozen, because nothing previously re-ran the session
+     * metadata fetch on reconnect. This asserts the fetch is retried on Reconnecting → Connected.
+     */
+    @Test fun reconnect_refreshes_session_title_and_model_after_initial_fetch_failure() = runTest {
+        coEvery { sessionRepo.get("s1", null) } throws RuntimeException("gateway unreachable")
+        val vm = buildVm()
+        vm.open("s1")
+        advanceUntilIdle()
+
+        // Simulate the initial connection succeeding (hasConnected must be true for reconnect to fire)
+        connectionStateFlow.value = ConnectionState.Connected
+        advanceUntilIdle()
+
+        // Confirm the bug precondition: the initial fetch failed, so the top bar is still on fallback.
+        assertEquals(null, vm.sessionTitle.value)
+        assertEquals(null, vm.currentModel.value)
+
+        // Gateway becomes reachable again; the session fetch now succeeds.
+        coEvery { sessionRepo.get("s1", null) } returns Session(
+            id = "s1", title = "Recovered session", model = "moa/coding-prod", provider = "moa",
+            messageCount = 1, profile = null,
+        )
+        connectionStateFlow.value = ConnectionState.Reconnecting
+        advanceUntilIdle()
+        connectionStateFlow.value = ConnectionState.Connecting
+        advanceUntilIdle()
+        connectionStateFlow.value = ConnectionState.Connected
+        advanceUntilIdle()
+
+        assertEquals("Recovered session", vm.sessionTitle.value)
+        assertEquals("moa", vm.currentProvider.value)
+        assertEquals("coding-prod", vm.currentModel.value)
     }
 
     /**
@@ -110,13 +175,75 @@ class ChatViewModelTest {
         coVerify { chatRepo.resume("s1", "personal") }
     }
 
+    // On open, the picker must seed from the session's resolved provider (e.g. a MoA preset under
+    // "moa") — not the gateway's global default. A vendor-prefixed model string ("moa/coding-prod")
+    // is stripped to the bare preset name for display, and the provider slug is surfaced directly.
+    @Test fun open_seeds_picker_from_session_provider() = runTest {
+        coEvery { sessionRepo.get("s1", null) } returns Session(
+            id = "s1", title = "t", model = "moa/coding-prod", provider = "moa",
+            messageCount = 1, profile = null,
+        )
+        val vm = buildVm()
+        vm.open("s1")
+        advanceUntilIdle()
+
+        assertEquals("moa", vm.currentProvider.value)
+        assertEquals("coding-prod", vm.currentModel.value)
+    }
+
+    /**
+     * Primary seed path: session.resume already returns model/provider/title in its `info`
+     * block. REST may fail (shape mismatch, unreachable) and must not block the top bar.
+     */
+    @Test fun open_seeds_title_and_model_from_resume_info_when_rest_fails() = runTest {
+        coEvery { sessionRepo.get("s1", null) } throws RuntimeException("decode failed")
+        coEvery { chatRepo.resume("s1", null) } returns com.hermes.client.data.repository.SessionResumeResult(
+            sessionId = "s1-live",
+            model = "grok-4.6",
+            provider = "xai-oauth",
+            title = "Named session",
+        )
+        val vm = buildVm()
+        vm.open("s1")
+        advanceUntilIdle()
+
+        assertEquals("Named session", vm.sessionTitle.value)
+        assertEquals("xai-oauth", vm.currentProvider.value)
+        assertEquals("grok-4.6", vm.currentModel.value)
+    }
+
+    @Test fun open_seeds_session_title() = runTest {
+        coEvery { sessionRepo.get("s1", null) } returns Session(
+            id = "s1", title = "Long session name", model = "coding-prod", provider = "moa",
+            messageCount = 1, profile = null,
+        )
+        val vm = buildVm()
+        vm.open("s1")
+        advanceUntilIdle()
+
+        assertEquals("Long session name", vm.sessionTitle.value)
+    }
+
+    // A bare (unprefixed) model string with a resolved provider must seed both fields directly.
+    @Test fun open_seeds_picker_from_bare_session_model() = runTest {
+        coEvery { sessionRepo.get("s1", null) } returns Session(
+            id = "s1", title = "t", model = "coding-prod", provider = "moa",
+            messageCount = 1, profile = null,
+        )
+        val vm = buildVm()
+        vm.open("s1"); advanceUntilIdle()
+
+        assertEquals("moa", vm.currentProvider.value)
+        assertEquals("coding-prod", vm.currentModel.value)
+    }
+
     /**
      * A pending image share must be staged as a local attachment chip (not attached to the
      * gateway immediately) — it's flushed on the next send() using whatever the live
      * post-resume sessionId is at that time.
      */
     @Test fun open_stages_pending_share_image_as_attachment() = runTest {
-        coEvery { chatRepo.resume("s1", null) } returns "s1-live"
+        coEvery { chatRepo.resume("s1", null) } returns com.hermes.client.data.repository.SessionResumeResult("s1-live", null, null, null)
         pendingShareStore.put(
             "s1",
             // Valid base64 (decodes to "abc") — real decode logic runs in unit tests.

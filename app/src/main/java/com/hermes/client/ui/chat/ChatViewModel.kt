@@ -61,6 +61,11 @@ class ChatViewModel @Inject constructor(
     private val _currentProvider = MutableStateFlow<String?>(null)
     val currentProvider: kotlinx.coroutines.flow.StateFlow<String?> = _currentProvider.asStateFlow()
 
+    // Session display title for the chat top bar. Seeded from GET /api/sessions/{id} on open;
+    // null until that fetch lands so the bar can fall back to "Chat".
+    private val _sessionTitle = MutableStateFlow<String?>(null)
+    val sessionTitle: StateFlow<String?> = _sessionTitle.asStateFlow()
+
     // Text handed off from a share (Share-to-Hermes). ChatScreen pre-fills the composer with it once.
     private val _initialDraft = MutableStateFlow<String?>(null)
     val initialDraft: StateFlow<String?> = _initialDraft.asStateFlow()
@@ -106,12 +111,22 @@ class ChatViewModel @Inject constructor(
     val pathItems: StateFlow<List<com.hermes.client.data.repository.PathItem>> = _pathItems.asStateFlow()
 
     private var sessionId: String = ""
+    /** The original session ID passed to open(), preserved even after resume() replaces
+     *  sessionId with an ephemeral live handle. Used by refreshSessionMeta() on reconnect so
+     *  it fetches session data for the real server-side session, not the opaque handle. */
+    private var _sessionIdOriginal: String = ""
     private var collectJob: Job? = null
     private var connJob: Job? = null
 
     fun open(id: String) {
         sessionId = id
+        _sessionIdOriginal = id
+        _sessionTitle.value = null
         connJob?.cancel()
+        // connect() first — resume() needs the live socket, and the notification service that
+        // normally owns the connection may not be running (e.g. POST_NOTIFICATIONS not granted),
+        // which would leave the chat "offline" until a manual retry. connect() is idempotent.
+        chat.connect()
         // A share created this session and stashed its text; surface it as the initial composer draft.
         val ps = pendingShareStore.take(id)
         ps?.text?.let { _initialDraft.value = it }
@@ -134,9 +149,16 @@ class ChatViewModel @Inject constructor(
             // submit/interrupt and event filtering use the id the gateway actually knows.
             // Pass the active profile: the gateway resolves resume against a per-profile DB,
             // so a session in a non-default profile is "session not found" without it.
-            val handle = runCatching { chat.resume(id, profileManager.active.value) }.getOrNull()
-            handle?.let { sessionId = it }
-            com.hermes.client.data.diagnostics.DebugLog.log("session", "resume($id) → handle=${handle ?: "none"}")
+            val resumeResult = runCatching { chat.resume(id, profileManager.active.value) }.getOrNull()
+            resumeResult?.sessionId?.let { sessionId = it }
+            com.hermes.client.data.diagnostics.DebugLog.log(
+                "session", "resume($id) → handle=${resumeResult?.sessionId ?: "none"} " +
+                    "model=${resumeResult?.model} provider=${resumeResult?.provider} title=${resumeResult?.title}"
+            )
+            // The gateway's resume response already carries model/provider/title (the same
+            // live info a session.info event or the desktop status bar are built from) — apply
+            // it straight away so the top bar doesn't wait on a second REST round trip.
+            applyResumeMeta(resumeResult)
             // A share may have handed off an image; stage it so it shows as a chip and is
             // flushed to the gateway on the next send (rather than attaching immediately).
             ps?.let { share ->
@@ -157,7 +179,7 @@ class ChatViewModel @Inject constructor(
                 }
             }
             // Load model options, profiles, and the slash-command catalog; failures are non-fatal
-            launch { runCatching { _providers.value = modelRepo.providers() } }
+            launch { refreshSessionMeta(id) }
             launch { runCatching { _profiles.value = profileRepo.list() } }
             launch { runCatching { _commands.value = chat.commandsCatalog() } }
         }
@@ -172,6 +194,7 @@ class ChatViewModel @Inject constructor(
         // C2 + I3: watch connection transitions
         connJob = viewModelScope.launch {
             var prev: ConnectionState? = null
+            var hasConnected: Boolean = false
             chat.connectionState.collect { cur ->
                 // I3: entering Reconnecting or Error while generating → mark interrupted
                 if ((cur is ConnectionState.Reconnecting || cur is ConnectionState.Error)
@@ -180,15 +203,95 @@ class ChatViewModel @Inject constructor(
                     _state.value = _state.value.markInterrupted()
                 }
                 // C2: reconnect cycle completed (Reconnecting → Connected) → re-attach agent stream
-                // Guard: prev must be Reconnecting (not null) to skip the very first Connected transition
-                if (cur is ConnectionState.Connected && prev is ConnectionState.Reconnecting) {
-                    launch {
-                        runCatching { chat.resume(sessionId, profileManager.active.value) }
-                            .getOrNull()?.let { sessionId = it }
+                // Guard: hasConnected tracks whether we've had a previous Connected transition,
+                // skipping the very first one (which is the initial connection from open(), where
+                // resume() and refreshSessionMeta() are already called inline). Every subsequent
+                // Connected — whether from auto-backoff recovery or a manual Retry — must re-arm
+                // the session handle and repopulate the top bar's title/model, since the original
+                // open()-time fetch may have failed silently (gateway unreachable at that moment)
+                // or the session state may have changed on the server.
+                if (cur is ConnectionState.Connected) {
+                    if (hasConnected) {
+                        launch {
+                            val resumeResult = runCatching { chat.resume(_sessionIdOriginal, profileManager.active.value) }.getOrNull()
+                            resumeResult?.sessionId?.let { sessionId = it }
+                            applyResumeMeta(resumeResult)
+                        }
+                        launch { refreshSessionMeta(_sessionIdOriginal) }
                     }
+                    hasConnected = true
                 }
                 prev = cur
             }
+        }
+    }
+
+    /**
+     * Apply the model/provider/title carried on a `session.resume` response directly — this is
+     * the same live data source (`_session_info()`) the gateway's `session.info` WS event and the
+     * desktop status bar use, already returned on every resume, so no REST round trip is needed
+     * on the happy path. [refreshSessionMeta] still runs afterward for the provider list (model
+     * picker) and as a fallback for any field resume left empty (e.g. a lazy/never-messaged
+     * session, where the gateway can't resolve a provider yet).
+     */
+    private fun applyResumeMeta(result: com.hermes.client.data.repository.SessionResumeResult?) {
+        result?.title?.takeIf { it.isNotBlank() }?.let { _sessionTitle.value = it }
+        result?.model?.takeIf { it.isNotBlank() }?.let { model ->
+            val provider = result.provider?.takeIf { it.isNotBlank() }
+            _currentProvider.value = provider
+            _currentModel.value = if (provider != null && model.startsWith("$provider/")) {
+                model.substringAfter("$provider/")
+            } else {
+                model
+            }
+        }
+    }
+
+    /**
+     * Seed the top-bar's session title and model/provider chip from the gateway. Called once from
+     * open() and again whenever the socket recovers from a Reconnecting→Connected cycle: the
+     * open()-time call is wrapped in runCatching (deliberately non-fatal), so if the gateway was
+     * unreachable at that exact moment — offline at open, connects after Retry — the fetch fails
+     * silently and nothing else re-arms it. Without a second call here, the title/model stay frozen
+     * on their fallback text ("Chat"/"Model") even after the message stream itself recovers.
+     *
+     * This is now a FALLBACK: [applyResumeMeta] (fed by session.resume's own info block) is the
+     * primary source and normally wins first. This still runs to load the provider list (needed
+     * by the model picker regardless) and to fill in title/model/provider if resume's info was
+     * incomplete.
+     */
+    private suspend fun refreshSessionMeta(id: String) {
+        runCatching { _providers.value = modelRepo.providers() }
+        // Seed the picker's current selection from this session's persisted model so the
+        // header shows the real model (not "Model") and the matching row is highlighted.
+        // Prefer the provider the session detail endpoint resolves (e.g. "moa" for a MoA
+        // preset); fall back to matching the model string against the loaded provider list.
+        runCatching {
+            val session = sessions.get(id, profileManager.active.value)
+            if (_sessionTitle.value == null) {
+                _sessionTitle.value = session.title.takeIf { it.isNotBlank() }
+            }
+            com.hermes.client.data.diagnostics.DebugLog.log("session", "seeded model=${session.model} provider=${session.provider} title=${session.title}")
+            if (_currentModel.value == null) {
+                session.model?.takeIf { it.isNotBlank() }?.let { model ->
+                    val provider = session.provider?.takeIf { it.isNotBlank() }
+                    _currentProvider.value = provider
+                        ?: _providers.value.firstOrNull { p -> model in p.models }?.slug
+                    _currentModel.value = if (provider != null && model.startsWith("$provider/")) {
+                        model.substringAfter("$provider/")
+                    } else {
+                        model
+                    }
+                }
+            }
+        }.onFailure { e ->
+            // Surface a failed fallback fetch — sessions.get() should be rare to fail on the
+            // happy path now that getRaw() tolerates both known gateway response shapes, but
+            // logging the exception here means a future shape drift is visible in a debug build
+            // instead of silently leaving the top bar frozen on "Chat"/"Model".
+            com.hermes.client.data.diagnostics.DebugLog.log(
+                "session", "refreshSessionMeta($id) FAILED: ${e::class.simpleName}: ${e.message}"
+            )
         }
     }
 

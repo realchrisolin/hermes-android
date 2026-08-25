@@ -82,7 +82,7 @@ fun modelSelectorRows(
     for (p in providers) {
         val rows = p.models.filter { matches(p.slug, it) }.map { rowOf(p.slug, it) }
         if (rows.isEmpty()) continue
-        items += ModelListItem.Header(p.name ?: p.slug, isCurrent = p.isCurrent)
+        items += ModelListItem.Header(p.slug, isCurrent = p.isCurrent)
         rows.forEach { items += ModelListItem.Row(it) }
     }
     return items

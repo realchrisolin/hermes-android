@@ -19,4 +19,36 @@ class MappersTest {
         assertEquals("hello", m.text)
         assertEquals(false, m.isStreaming)
     }
+
+    /**
+     * FastAPI dashboard row: top-level `model` is often null (overwritten / never set) and there
+     * is no `provider` column. The real route lives in `model_config` JSON.
+     */
+    @Test fun session_resolves_model_and_provider_from_model_config() {
+        val s = SessionDto(
+            sessionId = "s1",
+            title = "Named",
+            model = null,
+            provider = null,
+            modelConfig = """{"model":"anthropic/claude-sonnet-5","gateway_runtime":{"provider":"deepinfra"}}""",
+            billingProvider = "deepinfra",
+        ).toDomain()
+        assertEquals("anthropic/claude-sonnet-5", s.model)
+        assertEquals("deepinfra", s.provider)
+        assertEquals("Named", s.title)
+    }
+
+    /** MoA: billing_provider is the aggregator vendor; model_config.provider is the virtual "moa". */
+    @Test fun session_prefers_model_config_provider_over_billing_provider() {
+        val s = SessionDto(
+            sessionId = "s1",
+            title = "t",
+            model = "coding-prod",
+            provider = null,
+            modelConfig = """{"model":"coding-prod","provider":"moa"}""",
+            billingProvider = "anthropic",
+        ).toDomain()
+        assertEquals("coding-prod", s.model)
+        assertEquals("moa", s.provider)
+    }
 }

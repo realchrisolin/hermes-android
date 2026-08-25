@@ -39,6 +39,43 @@ class ChatRepositoryTest {
         coVerify { client.call("session.create", match { it["profile"]?.jsonPrimitive?.content == "acme" }) }
     }
 
+    @Test fun resume_extracts_live_handle_and_info_block() = runTest {
+        val client = mockk<HermesGatewayClient>(relaxed = true)
+        coEvery { client.call(any(), any()) } returns buildJsonObject {
+            put("session_id", "live-1")
+            put("info", buildJsonObject {
+                put("model", "grok-4.6")
+                put("provider", "xai-oauth")
+                put("title", "Named session")
+            })
+        }
+        val repo = ChatRepository(client)
+
+        val result = repo.resume("stored-1", profile = "personal")
+
+        assertEquals("live-1", result.sessionId)
+        assertEquals("grok-4.6", result.model)
+        assertEquals("xai-oauth", result.provider)
+        assertEquals("Named session", result.title)
+        coVerify { client.call("session.resume", match { it["session_id"]?.jsonPrimitive?.content == "stored-1" && it["profile"]?.jsonPrimitive?.content == "personal" }) }
+    }
+
+    @Test fun resume_tolerates_null_info_fields() = runTest {
+        val client = mockk<HermesGatewayClient>(relaxed = true)
+        coEvery { client.call(any(), any()) } returns buildJsonObject {
+            put("session_id", "live-1")
+            put("info", buildJsonObject {
+                put("model", kotlinx.serialization.json.JsonNull)
+                put("provider", kotlinx.serialization.json.JsonNull)
+                put("title", "Still titled")
+            })
+        }
+        val result = ChatRepository(client).resume("stored-1")
+        assertEquals("live-1", result.sessionId)
+        assertEquals(null, result.model)
+        assertEquals("Still titled", result.title)
+    }
+
     @Test fun createSession_omits_blank_profile() = runTest {
         val client = mockk<HermesGatewayClient>(relaxed = true)
         coEvery { client.call(any(), any()) } returns buildJsonObject { put("session_id", "abc") }

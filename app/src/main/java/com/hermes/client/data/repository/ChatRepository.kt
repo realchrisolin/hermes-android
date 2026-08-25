@@ -11,10 +11,24 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
 
 /** A "@" completion item: [text] is inserted, [display] shown, [meta] is a hint. */
 data class PathItem(val text: String, val display: String, val meta: String)
+
+/**
+ * Result of [ChatRepository.resume]. The gateway's `session.resume` RPC already returns a live
+ * `info` block (model/provider/title/cwd/branch — the same payload `session.info` WS events and
+ * the desktop client's status bar are built from), so there is no need for a second REST round
+ * trip to seed the top bar: this data is already on the wire on every resume.
+ */
+data class SessionResumeResult(
+    val sessionId: String?,
+    val model: String?,
+    val provider: String?,
+    val title: String?,
+)
 
 class ChatRepository(private val client: HermesGatewayClient) {
     val events: SharedFlow<ServerEvent> get() = client.events
@@ -44,7 +58,11 @@ class ChatRepository(private val client: HermesGatewayClient) {
     /**
      * Resumes a session. The gateway accepts the stored (REST) id but returns a NEW short
      * live handle in `session_id` — callers MUST use that returned id for subsequent
-     * submit/interrupt and for filtering streamed events. Returns null if not present.
+     * submit/interrupt and for filtering streamed events.
+     *
+     * The response also carries a live `info` block (model/provider/title — the same data the
+     * desktop status bar and `session.info` WS events are built from), so this doubles as the
+     * top-bar metadata seed: no separate REST call is needed for that on the happy path.
      *
      * [profile] MUST be the active profile: the gateway resolves session.resume against a
      * per-profile state.db, and without it a session that lives in a non-default profile is
@@ -52,12 +70,23 @@ class ChatRepository(private val client: HermesGatewayClient) {
      * resume succeeds, the live handle it returns is profile-independent (resolved in-memory),
      * so only resume needs the profile.
      */
-    suspend fun resume(sessionId: String, profile: String? = null): String? {
+    suspend fun resume(sessionId: String, profile: String? = null): SessionResumeResult {
         val result = client.call("session.resume", buildJsonObject {
             put("session_id", sessionId)
             if (!profile.isNullOrBlank()) put("profile", profile)
         })
-        return result.jsonObject["session_id"]?.jsonPrimitive?.content
+        val obj = result.jsonObject
+        val info = obj["info"]?.let { runCatching { it.jsonObject }.getOrNull() }
+        fun infoStr(key: String): String? {
+            val prim = info?.get(key) as? kotlinx.serialization.json.JsonPrimitive ?: return null
+            return prim.contentOrNull?.takeIf { it.isNotBlank() }
+        }
+        return SessionResumeResult(
+            sessionId = (obj["session_id"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull,
+            model = infoStr("model"),
+            provider = infoStr("provider"),
+            title = infoStr("title"),
+        )
     }
 
     suspend fun submit(sessionId: String, text: String) {
