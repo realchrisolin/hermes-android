@@ -51,7 +51,12 @@ class ChatRepository(private val client: HermesGatewayClient) {
         val result = client.call("session.create", buildJsonObject {
             if (!profile.isNullOrBlank()) put("profile", profile)
         })
-        return result.jsonObject["session_id"]?.jsonPrimitive?.content
+        val obj = result.jsonObject
+        // Prefer the durable stored key. session.create is lazy: session_id is a live 8-char
+        // handle in _sessions, stored_session_id is YYYYMMDD_HHMMSS_xxxxxx. Resume looks up
+        // DB by stored id / title / live session_key — never the live sid (#9).
+        return obj["stored_session_id"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+            ?: obj["session_id"]?.jsonPrimitive?.content
             ?: error("session.create returned no id")
     }
 
