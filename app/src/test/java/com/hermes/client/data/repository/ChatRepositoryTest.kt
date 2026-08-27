@@ -39,6 +39,24 @@ class ChatRepositoryTest {
         coVerify { client.call("session.create", match { it["profile"]?.jsonPrimitive?.content == "acme" }) }
     }
 
+    // Regression (#9): session.create is lazy and returns both session_id (live 8-char handle
+    // in _sessions) and stored_session_id (durable YYYYMMDD_HHMMSS_xxxxxx key). Resume looks
+    // up DB by stored id, then title, then live unpersisted by session_key/pending_title —
+    // never the live sid. Returning the live handle makes ChatViewModel.open() call
+    // session.resume with an id the gateway 4007s as "session not found". Prefer stored_session_id.
+    @Test fun createSession_prefers_stored_session_id_over_live_handle() = runTest {
+        val client = mockk<HermesGatewayClient>(relaxed = true)
+        coEvery { client.call(any(), any()) } returns buildJsonObject {
+            put("session_id", "a1b2c3d4")
+            put("stored_session_id", "20260826_213020_353083")
+        }
+        val repo = ChatRepository(client)
+
+        val id = repo.createSession(profile = "acme")
+
+        assertEquals("20260826_213020_353083", id)
+    }
+
     @Test fun resume_extracts_live_handle_and_info_block() = runTest {
         val client = mockk<HermesGatewayClient>(relaxed = true)
         coEvery { client.call(any(), any()) } returns buildJsonObject {
